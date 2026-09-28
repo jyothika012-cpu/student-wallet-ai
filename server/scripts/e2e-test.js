@@ -68,7 +68,13 @@ async function run() {
 
   const li = await call('/auth/login', { method: 'POST', body: { email: userA.email, password: userA.password } });
   check('login succeeds with right password', li.status === 200 && Boolean(li.body?.token));
-  check('login token differs per session (new JWT issued)', li.body?.token !== tokenA);
+  check('token is a 3-part signed JWT', (li.body?.token || '').split('.').length === 3);
+  // Signing is deterministic within the same second, so verify the *old* token still works.
+  const oldTokenStillValid = await call('/auth/me', { token: tokenA });
+  check('an earlier session token stays valid (works cross-device)', oldTokenStillValid.status === 200);
+  const tampered = `${tokenA.slice(0, -3)}abc`;
+  const tamperedRes = await call('/auth/me', { token: tampered });
+  check('a tampered token is rejected', tamperedRes.status === 401);
 
   const wrong = await call('/auth/login', { method: 'POST', body: { email: userA.email, password: 'wrong-password' } });
   check('login fails with wrong password', wrong.status === 401);
