@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { config, isSupabaseConfigured, db } from './lib/db.js';
-import { isGeminiConfigured } from './lib/ai.js';
+import { isAiConfigured, providerLabel } from './lib/ai.js';
 import { notFound, errorHandler } from './middleware.js';
 import authRoutes from './routes/auth.js';
 import itemRoutes from './routes/items.js';
@@ -96,7 +96,7 @@ export function createApp() {
       service: 'student-wallet-ai',
       time: new Date().toISOString(),
       database,
-      ai: isGeminiConfigured() ? 'connected' : 'not_configured',
+      ai: isAiConfigured() ? providerLabel() : 'not_configured',
     });
   });
 

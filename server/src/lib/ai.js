@@ -1,55 +1,93 @@
 /**
- * Google Gemini helper - BACKEND ONLY.
- * The API key is read from server/.env and is never sent to the browser.
+ * AI provider - BACKEND ONLY.
+ *
+ * Supports two providers, auto-detected from the key in server/.env:
+ *   • an OpenAI-compatible provider  (key starts with "sk-")  -> Gemini via OpenRouter
+ *   • a Google AI Studio key         (key starts with "AIza") -> Gemini direct
+ *
+ * Either way the browser only ever calls our own /api/ai routes; the key is
+ * never sent to the client.
  */
 import { config } from './db.js';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-export const isGeminiConfigured = () => Boolean(config.geminiKey);
+export const isAiConfigured = () =>
+  Boolean(config.aiKey) && Boolean(config.aiModel);
 
-/**
- * Call Gemini and return plain text.
- * Throws a friendly error if the key is missing or the API rejects the request.
- */
-export async function geminiText(prompt, options = {}) {
-  if (!isGeminiConfigured()) {
-    const err = new Error(
-      'The AI coach is not switched on yet. Add GEMINI_API_KEY to server/.env to enable it.',
-    );
-    err.status = 503;
-    throw err;
-  }
+/** Which provider the configured key belongs to. */
+export function provider() {
+  const key = String(config.aiKey || '');
+  if (key.startsWith('AIza')) return 'gemini';
+  if (key.startsWith('sk-')) return 'openrouter';
+  return key ? 'gemini' : 'none';
+}
 
-  const { system, temperature = 0.7, maxOutputTokens = 900, json = false } = options;
+// Kept for readability at call sites.
+export const isGeminiConfigured = isAiConfigured;
 
+/* ------------------------------------------------------------ direct ---- */
+async function callDirect(prompt, { system, temperature, maxOutputTokens }) {
   const body = {
     contents: [{ role: 'user', parts: [{ text: String(prompt).slice(0, 12000) }] }],
     generationConfig: { temperature, maxOutputTokens },
   };
   if (system) body.systemInstruction = { parts: [{ text: String(system).slice(0, 4000) }] };
-  if (json) body.generationConfig.responseMimeType = 'application/json';
 
-  const url = `${ENDPOINT}/${config.geminiModel}:generateContent?key=${encodeURIComponent(config.geminiKey)}`;
-
-  let res = await fetch(url, {
+  const url = `${ENDPOINT}/${config.aiModel}:generateContent?key=${encodeURIComponent(config.aiKey)}`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 
-  // JSON mode unsupported on this model -> retry once in plain-text mode.
-  if (!res.ok && json) {
-    delete body.generationConfig.responseMimeType;
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  const raw = await res.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = {};
   }
 
+  if (!res.ok) {
+    const err = new Error(
+      data?.error?.message || `AI request failed (${res.status}). Please try again in a moment.`,
+    );
+    err.status = res.status === 429 ? 429 : 502;
+    throw err;
+  }
+
+  return (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || '')
+    .join('')
+    .trim();
+}
+
+/* ---------------------------------------------------- openai-compatible - */
+async function callOpenAiCompatible(prompt, { system, temperature, maxOutputTokens }) {
+  const messages = [];
+  if (system) messages.push({ role: 'system', content: String(system).slice(0, 4000) });
+  messages.push({ role: 'user', content: String(prompt).slice(0, 12000) });
+
+  const res = await fetch(OPENROUTER_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.aiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://student-wallet-ai.vercel.app',
+      'X-Title': 'Student Wallet AI',
+    },
+    body: JSON.stringify({
+      model: config.aiModel,
+      messages,
+      temperature: temperature ?? 0.7,
+      max_tokens: maxOutputTokens ?? 900,
+    }),
+  });
+
   const raw = await res.text();
-  let data;
+  let data = {};
   try {
     data = raw ? JSON.parse(raw) : {};
   } catch {
@@ -58,35 +96,55 @@ export async function geminiText(prompt, options = {}) {
 
   if (!res.ok) {
     const message =
-      data?.error?.message || `AI request failed (${res.status}). Please try again in a moment.`;
-    const err = new Error(message);
+      data?.error?.message ||
+      data?.error?.metadata?.raw ||
+      `AI request failed (${res.status}). Please try again in a moment.`;
+    const err = new Error(String(message).slice(0, 300));
     err.status = res.status === 429 ? 429 : 502;
     throw err;
   }
 
-  const text = (data?.candidates?.[0]?.content?.parts || [])
-    .map((p) => p.text || '')
-    .join('')
-    .trim();
-
-  if (!text) {
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) {
     const err = new Error('The AI coach had nothing to say this time. Try rephrasing your question.');
     err.status = 502;
     throw err;
   }
-  return text;
+  return text.trim();
+}
+
+/* ------------------------------------------------------------ public ---- */
+/** Call the configured Gemini model and return plain text. */
+export async function geminiText(prompt, options = {}) {
+  if (!isAiConfigured()) {
+    const err = new Error(
+      'The AI coach is not switched on yet. Add GEMINI_API_KEY to server/.env to enable it.',
+    );
+    err.status = 503;
+    throw err;
+  }
+  const kind = provider();
+  if (kind === 'openrouter') return callOpenAiCompatible(prompt, options);
+  return callDirect(prompt, options);
+}
+
+export function providerLabel() {
+  const kind = provider();
+  if (kind === 'openrouter') return `gemini via openrouter (${config.aiModel})`;
+  if (kind === 'gemini') return `gemini direct (${config.aiModel})`;
+  return 'not_configured';
 }
 
 /** One-line friendly note stored on a transaction row. Never throws. */
 export async function writeTransactionNote(tx) {
-  if (!isGeminiConfigured()) return '';
+  if (!isAiConfigured()) return '';
   const amount = Number(tx.amount || 0);
   const kind = tx.kind === 'income' ? 'money received' : 'money spent';
   const prompt = `A student logged ${kind} of ${amount} in category "${tx.category || 'Other'}"${
     tx.description ? ` with the note: "${tx.description}"` : ''
   }, titled "${tx.title}". Write ONE short, friendly sentence (max 18 words) that explains this ${kind} in a useful way for a student's budget. No quotes, no emoji, no preamble.`;
   try {
-    return await geminiText(prompt, { temperature: 0.6, maxOutputTokens: 60 });
+    return await geminiText(prompt, { temperature: 0.6, maxOutputTokens: 80 });
   } catch {
     return '';
   }
@@ -106,10 +164,7 @@ export function buildContext({ summary, items, user }) {
     `Student: ${user?.fullName || 'Student'} (${user?.email || 'unknown'})`,
     `Month: ${s.month || 'current'}`,
     `Monthly budget: ${user?.monthlyBudget ? money(user.monthlyBudget, cur) : 'not set'}`,
-    `Income: ${money(t.income, cur)} | Spending: ${money(t.expense, cur)} | Balance: ${money(
-      t.balance,
-      cur,
-    )}`,
+    `Income: ${money(t.income, cur)} | Spending: ${money(t.expense, cur)} | Balance: ${money(t.balance, cur)}`,
   ];
   if (s.categories?.length) {
     lines.push(
@@ -137,27 +192,24 @@ export function buildContext({ summary, items, user }) {
 }
 
 const TASKS = {
-  /** Short plain-language summary of where the money went. */
   summarize: {
     label: 'Spending summary',
-    prompt: (ctx) => `Summarise this student's month in at most 4 short sentences. State the biggest spending category, the single biggest thing they could cut, and whether they are on track for the month. Use plain language, no bullet points, no headings.`,
+    prompt: () =>
+      `Summarise this student's month in at most 4 short sentences. State the biggest spending category, the single biggest thing they could cut, and whether they are on track for the month. Use plain language, no bullet points, no headings.`,
   },
-  /** Three concrete, realistic money tips. */
   tips: {
     label: 'Money tips',
-    prompt: (ctx) =>
+    prompt: () =>
       `Give exactly 3 specific, realistic money-saving tips for this student based on their actual numbers. Each tip must be one sentence and mention a concrete amount or action. Start with a line "1." then "2." then "3.". No preamble.`,
   },
-  /** A week-by-week plan. */
   plan: {
     label: 'Spending plan',
-    prompt: (ctx) =>
+    prompt: () =>
       `Create a simple plan for the rest of this month for this student. Give: Safe-to-spend for the remaining days (one line with the amount), then 3 short bullet lines of what to do. Be realistic for a student with a low income.`,
   },
-  /** Explains an odd/large transaction. */
   explain: {
     label: 'Explain this',
-    prompt: (ctx) =>
+    prompt: () =>
       `Look at the recent transactions and point out anything unusual: an expensive one, a repeated habit, or a category that is growing too fast. Answer in 2-3 short sentences and name the amounts.`,
   },
 };
@@ -171,7 +223,7 @@ export async function runTask(task, context) {
     throw err;
   }
   const prompt = `Here is the student's real financial data:\n\n${context}\n\n${spec.prompt(context)}`;
-  return geminiText(prompt, { temperature: 0.75, maxOutputTokens: 500 });
+  return geminiText(prompt, { temperature: 0.75, maxOutputTokens: 600 });
 }
 
 export const TASKS_AVAILABLE = Object.keys(TASKS);

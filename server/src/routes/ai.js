@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../lib/db.js';
 import { requireAuth, asyncHandler } from '../middleware.js';
-import { geminiText, runTask, buildContext, writeTransactionNote, isGeminiConfigured } from '../lib/ai.js';
+import { geminiText, runTask, buildContext, writeTransactionNote, isAiConfigured, providerLabel } from '../lib/ai.js';
 
 const router = Router();
 
@@ -57,7 +57,7 @@ router.post(
     const prompt = String(req.body?.prompt || '').trim();
     const { context, itemsCount } = await loadContext(req);
 
-    if (!isGeminiConfigured()) {
+    if (!isAiConfigured()) {
       return res.status(503).json({
         error: 'The AI coach is not switched on yet. Add GEMINI_API_KEY to server/.env to enable it.',
         configured: false,
@@ -93,6 +93,6 @@ router.post(
 );
 
 /** GET /api/ai/status */
-router.get('/status', (_req, res) => res.json({ configured: isGeminiConfigured() }));
+router.get('/status', (_req, res) => res.json({ configured: isAiConfigured() }));
 
 export default router;

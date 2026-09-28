@@ -23,8 +23,15 @@ export const config = {
   url: normaliseSupabaseUrl(ENV.SUPABASE_URL),
   anonKey: ENV.SUPABASE_ANON_KEY || '',
   serviceRoleKey: ENV.SUPABASE_SERVICE_ROLE_KEY || '',
-  geminiKey: ENV.GEMINI_API_KEY || '',
-  geminiModel: ENV.GEMINI_MODEL || 'gemini-2.0-flash',
+  // One key slot for the AI. Accepts a Google AI Studio key (AIza...) or an
+  // OpenAI-compatible key (sk-...) that routes to Gemini; see lib/ai.js.
+  aiKey: ENV.GEMINI_API_KEY || ENV.AI_API_KEY || '',
+  aiModel:
+    ENV.GEMINI_MODEL ||
+    ENV.AI_MODEL ||
+    (String(ENV.GEMINI_API_KEY || ENV.AI_API_KEY || '').startsWith('sk-')
+      ? 'google/gemini-2.5-flash'
+      : 'gemini-2.0-flash'),
   jwtSecret: ENV.JWT_SECRET || 'dev-only-insecure-secret',
   clientUrl: ENV.CLIENT_URL || 'http://localhost:5173',
 };
